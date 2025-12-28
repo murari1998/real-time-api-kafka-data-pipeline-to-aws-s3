@@ -1,0 +1,103 @@
+use l1;
+create or replace table api_data (
+    api_raw_data variant
+);
+
+create or replace stage api_stage
+URL = 's3://lokeshprojectbigdata01/api_to_s3/'
+CREDENTIALS=(
+  AWS_KEY_ID = 'AKfdfghjikooiuhgfdghj'
+  AWS_SECRET_KEY='mYNghjklkjhghjklkjhhj'
+)
+FILE_FORMAT = (TYPE = JSON);
+
+list @api_stage;
+
+create or replace pipe api_data_load
+AUTO_INGEST = TRUE
+AS
+COPY INTO api_data(api_raw_data)
+FROM (
+    SELECT $1
+    FROM @api_stage
+)
+FILE_FORMAT = (TYPE = JSON);
+
+
+show pipes like 'api_data_load';
+
+SELECT * FROM api_data;
+desc table api_data;
+select api_raw_data ,typeof(api_raw_data) from api_data;
+
+
+-- now i shift my data into silver table (manually)
+
+CREATE OR REPLACE STREAM api_data_stream
+ON TABLE api_data;
+
+SELECT * FROM api_data_stream;
+
+-- desc api_data;
+
+
+
+
+CREATE OR REPLACE TABLE silver_api_data (
+    id NUMBER,
+    name STRING,
+    age NUMBER,
+    city STRING
+);
+
+create or replace task bronze_to_gold_task
+warehouse = COMPUTE_WH
+schedule = '1 minute'
+as 
+INSERT INTO silver_api_data (id, name, age, city)
+SELECT 
+    element.value:"id"::NUMBER,
+    element.value:"name"::STRING,
+    element.value:"age"::NUMBER,
+    element.value:"city"::STRING
+FROM api_data_stream,
+     LATERAL FLATTEN(input => api_raw_data) element
+WHERE METADATA$ACTION = 'INSERT';
+
+alter task bronze_to_gold_task resume;
+alter task bronze_to_gold_task suspend;
+select * from silver_api_data;
+
+
+
+-- now transfer to gold table 
+CREATE OR REPLACE TABLE gold_api_data (
+    id NUMBER,
+    name STRING,
+    age NUMBER,
+    city STRING
+);
+
+CREATE OR REPLACE TASK silver_to_gold_task
+WAREHOUSE = COMPUTE_WH
+SCHEDULE = '1 MINUTE'
+AS
+INSERT INTO gold_api_data (id, name, age, city)
+SELECT 
+    s.id,
+    s.name,
+    s.age,
+    s.city
+FROM silver_api_data s
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM gold_api_data g
+    WHERE g.id = s.id
+);
+
+
+select * from gold_api_data;
+
+SHOW TASKS LIKE 'silver_to_gold_task';
+ALTER TASK silver_to_gold_task RESUME;
+ALTER TASK silver_to_gold_task SUSPEND;
